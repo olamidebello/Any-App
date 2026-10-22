@@ -198,3 +198,19 @@ server {listen 10.0.0.2:443 ssl proxy_protocol;}
     assert mod.listen_addresses(dump,443)==['443','127.0.0.1:443','181.214.149.146:443','[::]:443']
     assert mod.listen_addresses(dump,80)==['80','181.214.149.146:80']
     assert Path('/etc/nginx/panel/generated.conf') in mod.active_files(dump)
+
+@pytest.mark.parametrize('hostname,seconds,expected',[
+    ('anyapp.olamidepanel.com',604800,True),
+    ('another.olamidepanel.com',604800,False),
+    ('anyapp.olamidepanel.com',60*86400,False),
+])
+def test_certificate_hostname_and_expiry_are_independent(tmp_path,hostname,seconds,expected):
+    import importlib.util,subprocess
+    from pathlib import Path
+    certificate=tmp_path/'cert.pem'
+    subprocess.run(['openssl','req','-x509','-newkey','rsa:2048','-nodes','-keyout',str(tmp_path/'key.pem'),'-out',str(certificate),'-days','30','-subj','/CN=anyapp.olamidepanel.com','-addext','subjectAltName=DNS:anyapp.olamidepanel.com'],check=True,capture_output=True)
+    spec=importlib.util.spec_from_file_location('cert_check',Path(__file__).parents[1]/'scripts/check-certificate.py');mod=importlib.util.module_from_spec(spec);spec.loader.exec_module(mod)
+    result=mod.check(certificate,hostname,seconds)
+    assert result['valid'] is expected
+    assert result['hostname_valid'] is (hostname=='anyapp.olamidepanel.com')
+    assert result['expiry_valid'] is (seconds<30*86400)

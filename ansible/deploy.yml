@@ -115,13 +115,13 @@
       changed_when: false
     - name: Verify TLS certificate covers the assigned domain
       ansible.builtin.command:
-        argv: [openssl, x509, '-in', '{{ anyapps_tls_cert }}', '-noout', '-checkhost', '{{ anyapps_domain }}', '-checkend', '604800']
+        argv: [python3, '{{ anyapps_root }}/scripts/check-certificate.py', '{{ anyapps_tls_cert }}', '{{ anyapps_domain }}']
       register: tls
       failed_when: false
       changed_when: false
     - name: Record certificate hostname validation
       ansible.builtin.set_fact:
-        anyapps_tls_ready: "{{ tls.rc == 0 and 'does match certificate' in tls.stdout }}"
+        anyapps_tls_ready: "{{ tls.rc == 0 }}"
     - name: Check certificate covers generated project subdomains
       ansible.builtin.command:
         argv: [openssl, x509, '-in', '{{ anyapps_tls_cert }}', '-noout', '-checkhost', anyapps-wildcard-check.olamidepanel.com]
@@ -141,7 +141,7 @@
       register: tls_key
     - name: Check previously issued dedicated AnyApps certificate
       ansible.builtin.command:
-        argv: [openssl, x509, '-in', '/etc/letsencrypt/live/{{ anyapps_domain }}/fullchain.pem', '-noout', '-checkhost', '{{ anyapps_domain }}', '-checkend', '604800']
+        argv: [python3, '{{ anyapps_root }}/scripts/check-certificate.py', '/etc/letsencrypt/live/{{ anyapps_domain }}/fullchain.pem', '{{ anyapps_domain }}']
       register: dedicated_tls
       changed_when: false
       failed_when: false
@@ -157,7 +157,7 @@
         anyapps_tls_key: '/etc/letsencrypt/live/{{ anyapps_domain }}/privkey.pem'
         anyapps_tls_ready: true
         tls_key: {stat: {exists: true}}
-      when: dedicated_tls is not skipped and dedicated_tls.rc == 0 and 'does match certificate' in dedicated_tls.stdout and dedicated_key.stat.exists
+      when: dedicated_tls is not skipped and dedicated_tls.rc == 0 and dedicated_key.stat.exists
     - name: Discover effective nginx listener groups and included configuration
       ansible.builtin.command:
         argv: [python3, '{{ anyapps_root }}/scripts/repair-nginx-host.py', '--discover']
@@ -278,10 +278,10 @@
       changed_when: issued_tls.rc == 0
     - name: Verify issued certificate hostname and remaining validity
       ansible.builtin.command:
-        argv: [openssl, x509, '-in', '/etc/letsencrypt/live/{{ anyapps_domain }}/fullchain.pem', '-noout', '-checkhost', '{{ anyapps_domain }}', '-checkend', '604800']
+        argv: [python3, '{{ anyapps_root }}/scripts/check-certificate.py', '/etc/letsencrypt/live/{{ anyapps_domain }}/fullchain.pem', '{{ anyapps_domain }}']
       register: issued_certificate_check
       changed_when: false
-      failed_when: issued_certificate_check.rc != 0 or 'does match certificate' not in issued_certificate_check.stdout
+      failed_when: issued_certificate_check.rc != 0
       when: issued_tls is not skipped
     - name: Use dedicated TLS certificate after issuance
       ansible.builtin.set_fact:
