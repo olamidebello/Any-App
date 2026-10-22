@@ -150,3 +150,36 @@ server { server_name *.olamidepanel.com; }
     assert 'server_name detached-anyapp.olamidepanel.invalid;' in result
     assert 'server_name *.olamidepanel.com;' in result
     assert mod.detach_host(result)[1]==0
+
+def test_port_selection_keeps_unrelated_service_running():
+    import importlib.util,threading,urllib.request
+    from http.server import BaseHTTPRequestHandler,ThreadingHTTPServer
+    from pathlib import Path
+    spec=importlib.util.spec_from_file_location('port_selector',Path(__file__).parents[1]/'scripts/select-port.py');mod=importlib.util.module_from_spec(spec);spec.loader.exec_module(mod)
+    class Handler(BaseHTTPRequestHandler):
+        def do_GET(self):
+            self.send_response(200);self.end_headers();self.wfile.write(b'{"service":"africa-credit","status":"ok"}')
+        def log_message(self,*args):pass
+    server=ThreadingHTTPServer(('127.0.0.1',0),Handler);thread=threading.Thread(target=server.serve_forever,daemon=True);thread.start()
+    try:
+        occupied=server.server_port
+        with pytest.raises(RuntimeError):mod.select(occupied,start=0,end=0)
+        chosen=mod.select(occupied,start=18841,end=18940)
+        assert chosen!=occupied
+        assert mod.free(chosen)
+        with urllib.request.build_opener(urllib.request.ProxyHandler({})).open('http://127.0.0.1:'+str(occupied)+'/health') as r:
+            assert json.load(r)['service']=='africa-credit'
+    finally:server.shutdown();server.server_close();thread.join()
+
+def test_port_selection_reuses_running_anyapps():
+    import importlib.util,threading
+    from http.server import BaseHTTPRequestHandler,ThreadingHTTPServer
+    from pathlib import Path
+    spec=importlib.util.spec_from_file_location('port_selector',Path(__file__).parents[1]/'scripts/select-port.py');mod=importlib.util.module_from_spec(spec);spec.loader.exec_module(mod)
+    class Handler(BaseHTTPRequestHandler):
+        def do_GET(self):
+            self.send_response(200);self.end_headers();self.wfile.write(b'{"service":"AnyApps","status":"ok"}')
+        def log_message(self,*args):pass
+    server=ThreadingHTTPServer(('127.0.0.1',0),Handler);thread=threading.Thread(target=server.serve_forever,daemon=True);thread.start()
+    try:assert mod.select(18840,saved=server.server_port)==server.server_port
+    finally:server.shutdown();server.server_close();thread.join()

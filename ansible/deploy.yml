@@ -89,6 +89,14 @@
         owner: root
         group: anyapps
         mode: '0640'
+    - name: Select an available AnyApps port without stopping other applications
+      ansible.builtin.command:
+        argv: [python3, '{{ anyapps_root }}/scripts/select-port.py', '--preferred', '{{ anyapps_port | string }}']
+      register: selected_port
+      changed_when: (selected_port.stdout | from_json).changed
+    - name: Use the selected port for the service and nginx
+      ansible.builtin.set_fact:
+        anyapps_listen_port: '{{ (selected_port.stdout | from_json).port }}'
     - name: Install services
       ansible.builtin.template:
         src: service.j2
@@ -97,7 +105,7 @@
         group: root
         mode: '0644'
       loop:
-        - {suffix: '', command: '/opt/anyapps/venv/bin/gunicorn --workers 2 --bind 127.0.0.1:18840 --access-logfile - app:create_app()'}
+        - {suffix: '', command: '/opt/anyapps/venv/bin/gunicorn --workers 2 --bind 127.0.0.1:{{ anyapps_listen_port }} --access-logfile - app:create_app()'}
         - {suffix: '-worker', command: '/opt/anyapps/venv/bin/flask --app app worker'}
       notify: Restart AnyApps
     - name: Verify application import and initialize schema as service user
@@ -235,17 +243,20 @@
         enabled: true
         state: started
       loop: [anyapps, anyapps-worker]
+    - name: Clear prior AnyApps service failure state
+      ansible.builtin.command: systemctl reset-failed anyapps.service anyapps-worker.service
+      changed_when: false
     - name: Apply application restarts
       ansible.builtin.meta: flush_handlers
     - name: Check application health
       ansible.builtin.uri:
-        url: 'http://127.0.0.1:{{ anyapps_port }}/health'
+        url: 'http://127.0.0.1:{{ anyapps_listen_port }}/health'
         status_code: 200
       retries: 10
       delay: 3
       register: health
-      until: health.status == 200
-      failed_when: health.status != 200 or health.json.service | default('') != 'AnyApps' 
+      until: health.status | default(0) == 200 and health.json.service | default('') == 'AnyApps'
+      failed_when: health.status | default(0) != 200 or health.json.service | default('') != 'AnyApps' 
     - name: Reload validated nginx configuration
       ansible.builtin.systemd_service:
         name: nginx
@@ -332,7 +343,7 @@
     - name: Report deployment readiness
       ansible.builtin.debug:
         msg:
-          - 'Application is healthy on loopback port {{ anyapps_port }}.'
+          - 'Application is healthy on loopback port {{ anyapps_listen_port }}.'
           - 'TLS ready={{ anyapps_tls_ready and tls_key.stat.exists }}. Point anyapp.olamidepanel.com to this host. No DNS records were changed.'
           - 'Free project hosting enabled={{ anyapps_enable_project_hosting }}. Requires wildcard DNS and matching wildcard TLS.'
           - 'Android install result={{ apk.rc | default("skipped") }}. A missing CI release does not create a fake download link.'

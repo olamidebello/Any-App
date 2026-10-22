@@ -28,7 +28,7 @@ sudo bash scripts/deploy.sh -e anyapps_existing_env_file=/absolute/path/to/exist
 
 Use the actual server file that contains your existing AI key; never paste its content into chat. The script copies only supported credential fields into `/etc/anyapps/anyapps.env`, preserves existing AnyApps values and never prints keys. If no key is available, the UI remains usable but builds are not charged or queued.
 
-The script pulls `main` without overwriting local modifications, installs dependencies and starts services on **127.0.0.1:18840**. It creates no DNS records. Point `anyapp.olamidepanel.com` at the host. Default TLS paths:
+The script pulls `main` without overwriting local modifications, installs dependencies and starts services on an available loopback port (preferring **127.0.0.1:18840**). It creates no DNS records. Point `anyapp.olamidepanel.com` at the host. Default TLS paths:
 
 ```
 /etc/letsencrypt/live/olamidepanel.com/fullchain.pem
@@ -134,3 +134,7 @@ sudo bash scripts/repair-routing.sh
 This redeploys the dedicated AnyApps vhost. Conflicting exact `server_name` entries for **only** `anyapp.olamidepanel.com` are removed from other active nginx files after taking backups under `/var/backups/anyapps/nginx-*`. Other domain names, routes and services remain in place. An old block with no other name receives an inert `.invalid` name. Wildcard names are preserved; the new exact-name AnyApps vhost takes precedence. If nginx validation fails, prior hostname mappings are restored before any reload. The certificate is reused when valid or a dedicated Certbot certificate is requested. Local hostname routing, public TLS, `/health` service identity and homepage branding are checked. DNS or certificate failures stop deployment with an error rather than claiming the site is live.
 
 Rollback of detached mappings (only if needed): `sudo python3 scripts/repair-nginx-host.py --manifest /var/backups/anyapps/nginx-<checkpoint>/manifest.json --restore`, followed by `sudo nginx -t` and a reload only after successful validation. The timestamped checkpoint records original file paths.
+
+### Port collision protection
+
+The server already uses port 18840 for Africa Credit. AnyApps now probes the preferred port, reuses it only if it is free or serves the AnyApps health identity, and otherwise selects an available port from 18841–18939. The choice is saved in `/var/lib/anyapps/listen-port.json` and reused on subsequent deployments. Gunicorn, nginx and health checks all use the selected port. No other application is stopped or moved. A failed health identity check is retried while AnyApps starts, and deployment cannot succeed merely because another service returns HTTP 200.
