@@ -115,3 +115,20 @@ def test_admin_changes_notify_and_prices_persist(app,client):
 def test_reserved_subdomain(app,client):
     post(client,'/projects',name='test',idea='This is a long enough description',slug='anyapp')
     with app.app_context():assert app.db().execute('SELECT COUNT(*) FROM projects').fetchone()[0]==0
+
+def test_store_publisher_preserves_other_apps_and_visibility(tmp_path):
+    import importlib.util,sqlite3,zipfile
+    from pathlib import Path
+    spec=importlib.util.spec_from_file_location('publisher',Path(__file__).parents[1]/'scripts/publish-store.py');mod=importlib.util.module_from_spec(spec);spec.loader.exec_module(mod)
+    database=tmp_path/'store.sqlite3';apk=tmp_path/'app.apk'
+    with zipfile.ZipFile(apk,'w') as z:z.writestr('classes.dex',b'test');z.writestr('AndroidManifest.xml',b'test')
+    with sqlite3.connect(database) as c:
+        c.execute('CREATE TABLE hosted_apps(domain TEXT PRIMARY KEY,metadata TEXT,visible INTEGER DEFAULT 1,updated INTEGER)')
+        c.execute('INSERT INTO hosted_apps VALUES(?,?,?,?)',('existing.example','{}',1,1))
+        c.execute('INSERT INTO hosted_apps VALUES(?,?,?,?)',(mod.DOMAIN,'{}',0,1))
+    digest=hashlib.sha256(apk.read_bytes()).hexdigest()
+    assert mod.install(database,apk,digest) is False
+    with sqlite3.connect(database) as c:
+        assert c.execute('SELECT COUNT(*) FROM hosted_apps').fetchone()[0]==2
+        assert c.execute('SELECT metadata FROM hosted_apps WHERE domain=?',('existing.example',)).fetchone()[0]=='{}'
+        assert json.loads(c.execute('SELECT metadata FROM hosted_apps WHERE domain=?',(mod.DOMAIN,)).fetchone()[0])['sha256']==digest

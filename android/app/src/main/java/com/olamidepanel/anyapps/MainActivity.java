@@ -49,7 +49,8 @@ public class MainActivity extends Activity {
                 }
             }
         });
-        web.setDownloadListener((url,userAgent,contentDisposition,mimeType,contentLength)->{
+        web.setDownloadListener(new android.webkit.DownloadListener(){
+          @Override public void onDownloadStart(String url,String userAgent,String contentDisposition,String mimeType,long contentLength){
             Uri uri=Uri.parse(url);
             if(!"https".equals(uri.getScheme()) || !HOST.equals(uri.getHost())) return;
             try {
@@ -60,6 +61,7 @@ public class MainActivity extends Activity {
                 download.setDestinationInExternalPublicDir(Environment.DIRECTORY_DOWNLOADS,mimeType!=null&&mimeType.contains("zip")?"AnyApps-project.zip":"AnyApps.apk");
                 ((DownloadManager)getSystemService(DOWNLOAD_SERVICE)).enqueue(download);
             } catch(Exception ignored) { }
+          }
         });
         if(state!=null) web.restoreState(state); else web.loadUrl("https://"+HOST+"/");
     }

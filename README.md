@@ -81,17 +81,19 @@ sudo python3 scripts/install-apk.py
 
 The script verifies the published SHA-256 checksum and installs `/var/lib/anyapps/downloads/AnyApps.apk`. The website shows its download button only when that file exists. App URL: `https://anyapp.olamidepanel.com/`. The Android app uses a restricted HTTPS WebView, supports touch sketching and opens external checkout in the system browser. Browser and Android WebView sessions are separate: after checkout, sign in in the browser if needed to confirm the payment, then refresh the app.
 
-Local Android build: Java 17, Android SDK 35 and Gradle 8.9; run `gradle assembleDebug` from `android/`.
+Local Android build: JDK 17 and Android SDK platform/build-tools 35; run `ANDROID_HOME=/path/to/sdk bash android/tools/build.sh`. An optional Gradle project is also included; CI uses the dependency-light SDK builder. No private production signing key is included.
 
 ### Africa Apps Store
 
-The store's actual source/import contract has not been supplied or verified. To avoid corrupting its existing catalog, this repository exports a **separate feed**, not a guessed catalog replacement:
+The existing `olamidebello/africanappsstore` source was inspected. Its public hosted-app catalog is backed by `hosted_apps(domain,metadata,visible,updated)` in SQLite. After deploying AnyApps with HTTPS and its APK, publish directly into the existing store on the same host:
 
-- Worker output: `/var/lib/anyapps/store-feed/anyapps.json` includes AnyApps and approved live projects.
-- `scripts/store-export.py --store-root /actual/store/import-directory` creates `anyapps-import.json` for the AnyApps platform listing.
-- Set `anyapps_store_root` in Ansible to export it on deployment.
+```bash
+sudo /opt/anyapps/deploy-venv/bin/ansible-playbook -i localhost, -c local ansible/publish-store.yml
+```
 
-A compatible store importer must ingest that feed. Creating the feed is **not proof of a public listing** at https://africanappsstore.space/. APK installation, the existing store format, ingestion and public read-back must be verified on the server before declaring publication complete.
+The publisher discovers the existing `africanappsstore.service` data directory (default `/var/lib/africanappsstore/store.sqlite3`), backs up the database, validates its schema and updates **only** `anyapp.olamidepanel.com`. It preserves any existing visibility setting and every other listing. Override the database by running `scripts/publish-store.py --database /actual/store.sqlite3` directly if the service uses EnvironmentFile-based overrides. It verifies public AnyApps health, the exact public APK checksum and the public store catalog before reporting success. The download is hosted on AnyApps and linked from the store's existing **Hosted apps** view; no store source replacement or restart is necessary.
+
+`store-export.py` and the worker's feed remain available as optional import outputs for future automation. A GitHub push does not itself update the live store database. Direct server access is needed to run the publisher.
 
 ## Verify locally
 
