@@ -142,3 +142,17 @@ The server already uses port 18840 for Africa Credit. AnyApps now probes the pre
 ### HTTPS certificate routing
 
 Routing discovery now reads `nginx -T`, including panel-managed configuration outside `sites-enabled` and `conf.d`. AnyApps joins existing non-proxy-protocol HTTP/HTTPS address groups so an explicit IP listener cannot silently select another default site's certificate. Conflicting exact hostnames are backed up and detached across all active included files. Newly issued and reused certificates are checked for the AnyApps hostname and remaining validity. The local HTTPS check bypasses outbound proxies, verifies TLS normally and retries after reload. If it still fails, the playbook reports the served certificate subject/SAN and active listener groups without displaying private keys. Run `sudo python3 scripts/repair-nginx-host.py --diagnose` for the same diagnostic.
+
+## Super admin API-key manager
+
+Open **Admin → API keys & connections**. Supported integrations: OpenAI, Stripe secret key, Stripe webhook signing secret, Paystack and Flutterwave.
+
+- Save/replace a provider key in a password field; the saved value is never returned to the page.
+- Enable, disable or remove the saved key. Disabling also blocks environment fallback. Removing clears saved ciphertext and leaves the credential disabled. Enabling without a saved key restores the existing environment fallback.
+- Test connections with fixed, read-only provider requests; no charge or generation request is made. Stripe webhook tests are local signing checks, not proof of delivery from Stripe.
+- Every action requires the current administrator password plus the normal session/CSRF protection and is rate limited. Audit entries contain action/name only, never keys. Provider response bodies and exception details are not logged or displayed.
+- Provider credentials use authenticated Fernet encryption in SQLite. The separate encryption key is generated atomically with permissions 0600 at `/var/lib/anyapps/api-vault.key` (or next to the configured database for local development). The application and worker read current settings for each new request; no service restart is needed after a GUI key change. In-flight operations can still finish with the credential they already loaded.
+
+Back up the encryption key **together with the database**, including after the first GUI key save. Deployment backs up an existing default-location encryption key to `/var/backups/anyapps/api-vault.key` before updates. This local backup is not an off-server disaster-recovery backup. Missing encryption keys fail closed and are never silently regenerated over existing encrypted credentials. `ANYAPPS_VAULT_KEY_PATH` may override the key location; custom-location backups are the operator's responsibility.
+
+Saving a new key replaces the platform's credential; it does not revoke the old key at the provider. Revoke compromised or retired keys in the provider dashboard. Payment-gateway availability still requires both an enabled credential and the existing gateway toggle. A successful read-only test does not prove model access, available quota, live checkout or webhook delivery. Arbitrary API endpoints, provider-side key issuance and vault master-key rotation are not implemented.

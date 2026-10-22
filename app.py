@@ -4,6 +4,7 @@ import functools, hashlib, hmac, io, json, os, re, secrets, sqlite3, time, uuid,
 from pathlib import Path
 from urllib import request as http, parse
 import click
+import credential_store as vault
 from flask import Flask, abort, flash, g, jsonify, redirect, render_template, request, send_file, session, url_for
 from werkzeug.middleware.proxy_fix import ProxyFix
 from werkzeug.security import check_password_hash, generate_password_hash
@@ -24,6 +25,7 @@ def create_app(test_config=None):
             g.db.execute('PRAGMA foreign_keys=ON')
         return g.db
     app.db=db
+    def credential(name): return vault.get(db(),name)
     @app.teardown_appcontext
     def close(_):
         if 'db' in g: g.db.close()
@@ -142,7 +144,7 @@ def create_app(test_config=None):
     @auth()
     def build(pid):
         owned(pid)
-        if setting('builds_enabled')!='1' or not os.environ.get('OPENAI_API_KEY'): flash('Build service is not ready. Your credits have not been charged.','error'); return redirect('/projects/'+pid)
+        if setting('builds_enabled')!='1' or not credential('OPENAI_API_KEY'): flash('Build service is not ready. Your credits have not been charged.','error'); return redirect('/projects/'+pid)
         bid=uuid.uuid4().hex
         try:
             db().execute('BEGIN IMMEDIATE')
@@ -181,7 +183,7 @@ def create_app(test_config=None):
     @app.get('/marketplace')
     def marketplace(): return render_template('marketplace.html',plans=db().execute('SELECT * FROM plans WHERE active=1').fetchall(),listings=db().execute("SELECT l.*,p.slug FROM listings l JOIN projects p ON p.id=l.project_id WHERE l.status='approved' AND p.public=1").fetchall(),gateways=available_gateways(),projects=db().execute('SELECT * FROM projects WHERE user_id=?',(g.user['id'],)).fetchall() if g.user else [])
     def available_gateways():
-        return [k for k,env in [('stripe','STRIPE_SECRET_KEY'),('paystack','PAYSTACK_SECRET_KEY'),('flutterwave','FLUTTERWAVE_SECRET_KEY')] if setting(k+'_enabled')=='1' and os.environ.get(env)]
+        return [k for k,env in [('stripe','STRIPE_SECRET_KEY'),('paystack','PAYSTACK_SECRET_KEY'),('flutterwave','FLUTTERWAVE_SECRET_KEY')] if setting(k+'_enabled')=='1' and credential(env)]
     @app.post('/projects/<pid>/list')
     @auth()
     def list_project(pid):
@@ -202,13 +204,13 @@ def create_app(test_config=None):
         try:
             if provider=='stripe':
                 import stripe
-                s=stripe.checkout.Session.create(api_key=os.environ['STRIPE_SECRET_KEY'],idempotency_key=oid,mode='payment',client_reference_id=oid,customer_email=g.user['email'],line_items=[{'price_data':{'currency':'usd','product_data':{'name':'AnyApps '+plan['name']},'unit_amount':plan['price']},'quantity':1}],success_url=base+'/payments/return/'+oid,cancel_url=base+'/marketplace')
+                s=stripe.checkout.Session.create(api_key=credential('STRIPE_SECRET_KEY'),idempotency_key=oid,mode='payment',client_reference_id=oid,customer_email=g.user['email'],line_items=[{'price_data':{'currency':'usd','product_data':{'name':'AnyApps '+plan['name']},'unit_amount':plan['price']},'quantity':1}],success_url=base+'/payments/return/'+oid,cancel_url=base+'/marketplace')
                 ref=s.id; target=s.url
             elif provider=='paystack':
-                r=api('https://api.paystack.co/transaction/initialize',os.environ['PAYSTACK_SECRET_KEY'],{'email':g.user['email'],'amount':plan['price'],'currency':'USD','reference':oid,'callback_url':base+'/payments/return/'+oid})
+                r=api('https://api.paystack.co/transaction/initialize',credential('PAYSTACK_SECRET_KEY'),{'email':g.user['email'],'amount':plan['price'],'currency':'USD','reference':oid,'callback_url':base+'/payments/return/'+oid})
                 ref=oid; target=r['data']['authorization_url']
             else:
-                r=api('https://api.flutterwave.com/v3/payments',os.environ['FLUTTERWAVE_SECRET_KEY'],{'tx_ref':oid,'amount':str(plan['price']/100),'currency':'USD','redirect_url':base+'/payments/return/'+oid,'customer':{'email':g.user['email']},'customizations':{'title':'AnyApps '+plan['name']}})
+                r=api('https://api.flutterwave.com/v3/payments',credential('FLUTTERWAVE_SECRET_KEY'),{'tx_ref':oid,'amount':str(plan['price']/100),'currency':'USD','redirect_url':base+'/payments/return/'+oid,'customer':{'email':g.user['email']},'customizations':{'title':'AnyApps '+plan['name']}})
                 ref=oid; target=r['data']['link']
             if parse.urlparse(target).hostname not in ('checkout.stripe.com','checkout.paystack.com','checkout.flutterwave.com'): raise ValueError('Unexpected checkout domain')
             db().execute('UPDATE orders SET provider_ref=? WHERE id=?',(ref,oid)); return redirect(target,303)
@@ -236,15 +238,15 @@ def create_app(test_config=None):
         try:
             if o['provider']=='stripe':
                 import stripe
-                r=stripe.checkout.Session.retrieve(o['provider_ref'],api_key=os.environ['STRIPE_SECRET_KEY'])
+                r=stripe.checkout.Session.retrieve(o['provider_ref'],api_key=credential('STRIPE_SECRET_KEY'))
                 if r.payment_status=='paid': fulfill(oid,r.id,r.amount_total,r.currency)
             elif o['provider']=='paystack':
-                r=api('https://api.paystack.co/transaction/verify/'+parse.quote(o['provider_ref'],safe=''),os.environ['PAYSTACK_SECRET_KEY'])['data']
+                r=api('https://api.paystack.co/transaction/verify/'+parse.quote(o['provider_ref'],safe=''),credential('PAYSTACK_SECRET_KEY'))['data']
                 if r['status']=='success': fulfill(oid,r['reference'],int(r['amount']),r['currency'])
             elif o['provider']=='flutterwave':
                 tx=request.args.get('transaction_id','')
                 if not tx.isdigit(): raise ValueError('Missing transaction')
-                r=api('https://api.flutterwave.com/v3/transactions/'+tx+'/verify',os.environ['FLUTTERWAVE_SECRET_KEY'])['data']
+                r=api('https://api.flutterwave.com/v3/transactions/'+tx+'/verify',credential('FLUTTERWAVE_SECRET_KEY'))['data']
                 if r['status']=='successful': fulfill(oid,r['tx_ref'],round(float(r['amount'])*100),r['currency'])
             flash('Payment checked. Your dashboard shows the confirmed order and credit balance.')
         except Exception: flash('Payment is awaiting verification. Do not pay again; contact support with order '+oid,'error')
@@ -252,7 +254,7 @@ def create_app(test_config=None):
     @app.post('/payments/stripe/webhook')
     def stripe_webhook():
         import stripe
-        secret=os.environ.get('STRIPE_WEBHOOK_SECRET')
+        secret=credential('STRIPE_WEBHOOK_SECRET')
         if not secret: abort(503)
         try: event=stripe.Webhook.construct_event(request.get_data(),request.headers.get('Stripe-Signature',''),secret)
         except Exception: abort(400)
@@ -266,8 +268,40 @@ def create_app(test_config=None):
     @auth(admin=True)
     def admin():
         tables={k:db().execute('SELECT * FROM '+k+' ORDER BY rowid DESC LIMIT 200').fetchall() for k in ('users','plans','projects','builds','orders','listings','deployments','deliveries','audit')}
-        ready={k:bool(os.environ.get(k)) for k in ('OPENAI_API_KEY','STRIPE_SECRET_KEY','STRIPE_WEBHOOK_SECRET','PAYSTACK_SECRET_KEY','FLUTTERWAVE_SECRET_KEY','PUBLISH_ROOT','STORE_EXPORT_ROOT')}
-        return render_template('admin.html',tables=tables,ready=ready)
+        key_status=vault.statuses(db())
+        ready={k:bool(os.environ.get(k)) for k in ('PUBLISH_ROOT','STORE_EXPORT_ROOT')}
+        ready.update({k['name']:k['configured'] for k in key_status})
+        return render_template('admin.html',tables=tables,ready=ready,key_status=key_status)
+    @app.post('/admin/credentials/<name>')
+    @auth(admin=True)
+    def admin_credential(name):
+        if name not in vault.CREDENTIALS: abort(404)
+        limited('credentials:'+str(g.user['id']),30)
+        if not check_password_hash(g.user['password'],request.form.get('admin_password','')):
+            audit('credential.auth_failed',name); flash('Your current administrator password is required.','error'); return redirect('/admin#api-keys')
+        action=request.form.get('action','')
+        try:
+            if action=='save':
+                vault.save(db(),name,request.form.get('value','').strip(),g.user['id'])
+                flash('API key saved securely. It will not be displayed again. Changes apply to new requests without a restart.')
+            elif action in ('enable','disable','remove'):
+                vault.control(db(),name,action,g.user['id'])
+                flash('Saved key removed and integration disabled.' if action=='remove' else 'Credential '+action+'d. Server environment values were not changed.')
+            elif action=='test':
+                key=credential(name)
+                if not key:raise ValueError('Save or enable a credential first.')
+                result=test_credential(name,key)
+                db().execute('INSERT INTO api_credentials(name,enabled,last_test,tested,updated_by) VALUES(?,1,?,CURRENT_TIMESTAMP,?) ON CONFLICT(name) DO UPDATE SET last_test=excluded.last_test,tested=excluded.tested',(name,result,g.user['id']))
+                flash(result)
+            else:abort(400)
+            audit('credential.'+action,name)
+        except ValueError as e:flash(str(e),'error')
+        except vault.VaultError:
+            flash('The encrypted credential vault is unavailable. Restore its protected encryption-key backup.','error')
+        return redirect('/admin#api-keys')
+    @app.errorhandler(vault.VaultError)
+    def vault_error(error):
+        return app.response_class('Credential service unavailable. Contact the administrator.',status=503,mimetype='text/plain')
     @app.post('/admin/settings')
     @auth(admin=True)
     def admin_settings():
@@ -278,7 +312,7 @@ def create_app(test_config=None):
         db().execute("UPDATE settings SET value=? WHERE key='delivery_days'",(str(days),))
         model=request.form.get('ai_model','').strip()
         if re.fullmatch(r'[A-Za-z0-9._:-]{1,100}',model): db().execute('UPDATE settings SET value=? WHERE key=\'ai_model\'',(model,))
-        audit('settings.update'); flash('Settings saved. Credentials remain in the server environment.'); return redirect('/admin#settings')
+        audit('settings.update'); flash('Settings saved. API keys are managed separately below.'); return redirect('/admin#settings')
     @app.post('/admin/users/<int:uid>')
     @auth(admin=True)
     def admin_user(uid):
@@ -372,3 +406,23 @@ def api(url,key,data=None):
     with http.urlopen(req,timeout=120) as r: return json.load(r)
 
 if __name__=='__main__': create_app().run(host='127.0.0.1',port=18840)
+
+
+def test_credential(name,key):
+    try:
+        if name=='STRIPE_WEBHOOK_SECRET':
+            import stripe
+            stamp=str(int(time.time()));payload=b'{"id":"evt_anyapps_local_test","type":"anyapps.local_test","data":{"object":{}}}'
+            signature=hmac.new(key.encode(),stamp.encode()+b'.'+payload,hashlib.sha256).hexdigest()
+            stripe.Webhook.construct_event(payload,'t='+stamp+',v1='+signature,key)
+            return 'Local signing check passed. Configure the matching Stripe endpoint secret; this does not verify delivery from Stripe.'
+        endpoints={'OPENAI_API_KEY':'https://api.openai.com/v1/models','STRIPE_SECRET_KEY':'https://api.stripe.com/v1/balance','PAYSTACK_SECRET_KEY':'https://api.paystack.co/balance','FLUTTERWAVE_SECRET_KEY':'https://api.flutterwave.com/v3/balances'}
+        req=http.Request(endpoints[name],headers={'Authorization':'Bearer '+key,'User-Agent':'AnyApps/1.0'})
+        class NoRedirect(http.HTTPRedirectHandler):
+            def redirect_request(self,*args,**kwargs):return None
+        with http.build_opener(NoRedirect()).open(req,timeout=15) as response:
+            result=json.loads(response.read(1048576))
+        if result.get('status') is False or (name=='FLUTTERWAVE_SECRET_KEY' and result.get('status')!='success'):raise ValueError('Provider rejected request')
+        return 'Provider accepted the read-only check. Model access, quota, checkout and live transactions still require their own verification.'
+    except Exception:
+        return 'Connection check failed. Verify key permissions, provider account status and server connectivity. Secret and provider response were not recorded.'

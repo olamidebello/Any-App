@@ -214,3 +214,76 @@ def test_certificate_hostname_and_expiry_are_independent(tmp_path,hostname,secon
     assert result['valid'] is expected
     assert result['hostname_valid'] is (hostname=='anyapp.olamidepanel.com')
     assert result['expiry_valid'] is (seconds<30*86400)
+
+def test_api_keys_are_encrypted_write_only_and_admin_only(app,client):
+    import credential_store as vault
+    key='sk-test-unique-secret-123456789'
+    assert post(client,'/admin/credentials/OPENAI_API_KEY',action='save',value=key,admin_password='a-long-password-123').status_code==403
+    with client.session_transaction() as s:s['uid']=3
+    # Reauthentication is mandatory, even for a signed-in admin.
+    post(client,'/admin/credentials/OPENAI_API_KEY',action='save',value=key,admin_password='wrong')
+    with app.app_context():assert app.db().execute('SELECT COUNT(*) FROM api_credentials').fetchone()[0]==0
+    post(client,'/admin/credentials/OPENAI_API_KEY',action='save',value=key,admin_password='a-long-password-123')
+    with app.app_context():
+        row=app.db().execute('SELECT * FROM api_credentials').fetchone()
+        assert key not in row['ciphertext'] and row['ciphertext']!=key
+        assert vault.get(app.db(),'OPENAI_API_KEY')==key
+        assert key not in str([dict(r) for r in app.db().execute('SELECT * FROM audit')])
+    assert key.encode() not in client.get('/admin').data
+    assert 'API keys &amp; connections' in client.get('/admin').data.decode() or b'API keys & connections' in client.get('/admin').data
+
+def test_key_controls_disable_environment_fallback_and_remove_ciphertext(app,client,monkeypatch):
+    import credential_store as vault
+    monkeypatch.setenv('OPENAI_API_KEY','sk-environment-key-123456')
+    with client.session_transaction() as s:s['uid']=3
+    def action(a,**kw):return post(client,'/admin/credentials/OPENAI_API_KEY',action=a,admin_password='a-long-password-123',**kw)
+    action('save',value='sk-new-key-123456789012345')
+    action('disable')
+    with app.app_context():assert vault.get(app.db(),'OPENAI_API_KEY') is None
+    action('enable')
+    with app.app_context():assert vault.get(app.db(),'OPENAI_API_KEY')=='sk-new-key-123456789012345'
+    action('remove')
+    with app.app_context():
+        assert vault.get(app.db(),'OPENAI_API_KEY') is None
+        assert app.db().execute('SELECT ciphertext FROM api_credentials').fetchone()[0] is None
+    action('enable')
+    with app.app_context():assert vault.get(app.db(),'OPENAI_API_KEY')=='sk-environment-key-123456'
+
+def test_vault_key_loss_fails_closed_and_does_not_regenerate(app):
+    import credential_store as vault
+    from pathlib import Path
+    with app.app_context():
+        vault.save(app.db(),'OPENAI_API_KEY','sk-long-enough-for-a-test-123456',3)
+        keyfile=Path(app.config['DATABASE']).parent/'api-vault.key'
+        assert keyfile.stat().st_mode&0o777==0o600
+        keyfile.unlink()
+        with pytest.raises(vault.VaultError):vault.get(app.db(),'OPENAI_API_KEY')
+        assert not keyfile.exists()
+
+def test_build_worker_reads_gui_key_without_restart(app,client,monkeypatch):
+    import worker
+    from credential_store import save
+    with app.app_context():save(app.db(),'OPENAI_API_KEY','sk-vault-build-worker-123456789',3)
+    captured=[]
+    def generate(url,key,data):
+        captured.append(key)
+        return {'status':'completed','output':[{'content':[{'type':'output_text','text':'<!doctype html><html><body>Created</body></html>'}]}]}
+    monkeypatch.setattr(worker,'api',generate)
+    pid=project(client);post(client,'/projects/'+pid+'/build')
+    with app.app_context():worker.process_build(app)
+    assert captured==['sk-vault-build-worker-123456789']
+
+def test_connection_test_masks_provider_errors_and_records_result(app,client,monkeypatch):
+    import app as module
+    key='sk-secret-test-never-render-123456'
+    with client.session_transaction() as s:s['uid']=3
+    post(client,'/admin/credentials/OPENAI_API_KEY',action='save',value=key,admin_password='a-long-password-123')
+    class Fail:
+        def open(self,*args,**kw):raise RuntimeError(key)
+    monkeypatch.setattr(module.http,'build_opener',lambda *a:Fail())
+    response=post(client,'/admin/credentials/OPENAI_API_KEY',action='test',admin_password='a-long-password-123')
+    assert response.status_code==302
+    with app.app_context():
+        row=app.db().execute('SELECT last_test FROM api_credentials').fetchone()
+        assert 'failed' in row['last_test'] and key not in row['last_test']
+    assert key.encode() not in client.get('/admin').data

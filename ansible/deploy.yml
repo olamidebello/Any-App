@@ -63,6 +63,20 @@
       args:
         executable: /bin/bash
       changed_when: false
+    - name: Check credential vault encryption-key backup source
+      ansible.builtin.stat:
+        path: /var/lib/anyapps/api-vault.key
+      register: vault_key_file
+    - name: Back up vault encryption key beside database backups
+      ansible.builtin.copy:
+        src: /var/lib/anyapps/api-vault.key
+        dest: /var/backups/anyapps/api-vault.key
+        remote_src: true
+        owner: root
+        group: root
+        mode: '0600'
+      when: vault_key_file.stat.exists
+      no_log: true
     - name: Pull reviewed source without discarding local modifications
       ansible.builtin.git:
         repo: '{{ anyapps_repo }}'

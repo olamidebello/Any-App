@@ -27,3 +27,4 @@ INSERT OR IGNORE INTO settings VALUES('delivery_days','7');
 UPDATE plans SET name='AnyApps Complete',description='One app project · 5 builds or revisions · free web hosting · free subdomain · free Africa Apps Store listing',price=99900,credits=5 WHERE id=1 AND name='Spark';
 UPDATE plans SET active=0 WHERE id IN (2,3) AND name IN ('Launch','Studio');
 CREATE TABLE IF NOT EXISTS order_projects(order_id TEXT PRIMARY KEY REFERENCES orders(id),project_id TEXT NOT NULL REFERENCES projects(id),delivery_days INTEGER NOT NULL);
+CREATE TABLE IF NOT EXISTS api_credentials(name TEXT PRIMARY KEY,ciphertext TEXT,enabled INTEGER NOT NULL DEFAULT 1,updated_by INTEGER REFERENCES users(id),updated TEXT DEFAULT CURRENT_TIMESTAMP,last_test TEXT,tested TEXT);
