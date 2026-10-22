@@ -35,7 +35,7 @@ The script pulls `main` without overwriting local modifications, installs depend
 /etc/letsencrypt/live/olamidepanel.com/privkey.pem
 ```
 
-The certificate must cover `anyapp.olamidepanel.com`. Override `anyapps_tls_cert` and `anyapps_tls_key` when using a dedicated certificate. A missing or mismatched certificate yields HTTP health/setup access only; secure session cookies require HTTPS for account use. The playbook does not claim TLS readiness until the hostname matches.
+The certificate must cover `anyapp.olamidepanel.com`. Override `anyapps_tls_cert` and `anyapps_tls_key` when using a dedicated certificate. A missing or mismatched certificate now triggers a dedicated HTTP-01 certificate request for `anyapp.olamidepanel.com` using Certbot. DNS must point to this host and port 80 must be reachable. Set `anyapps_tls_email` to receive certificate account notices. No DNS records are changed. The playbook verifies the public HTTPS health response and AnyApps homepage before reporting success.
 
 Create your first administrator interactively:
 
@@ -120,3 +120,17 @@ Free hosting does not imply unlimited infrastructure. This implementation has no
 - https://developer.flutterwave.com/docs/flutterwave-standard-1
 - https://developer.flutterwave.com/docs/transaction-verification
 - Privacy practice reference: https://www.ftc.gov/business-guidance/resources/protecting-personal-information-guide-business-0
+
+## Repair a domain showing another application
+
+If `anyapp.olamidepanel.com` shows Africa Bulk Hub or another default site, run on the hosting server:
+
+```bash
+cd /opt/anyapps/repo
+git pull --ff-only
+sudo bash scripts/repair-routing.sh
+```
+
+This redeploys the dedicated AnyApps vhost. Conflicting exact `server_name` entries for **only** `anyapp.olamidepanel.com` are removed from other active nginx files after taking backups under `/var/backups/anyapps/nginx-*`. Other domain names, routes and services remain in place. An old block with no other name receives an inert `.invalid` name. Wildcard names are preserved; the new exact-name AnyApps vhost takes precedence. If nginx validation fails, prior hostname mappings are restored before any reload. The certificate is reused when valid or a dedicated Certbot certificate is requested. Local hostname routing, public TLS, `/health` service identity and homepage branding are checked. DNS or certificate failures stop deployment with an error rather than claiming the site is live.
+
+Rollback of detached mappings (only if needed): `sudo python3 scripts/repair-nginx-host.py --manifest /var/backups/anyapps/nginx-<checkpoint>/manifest.json --restore`, followed by `sudo nginx -t` and a reload only after successful validation. The timestamped checkpoint records original file paths.

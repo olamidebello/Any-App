@@ -14,6 +14,9 @@
     anyapps_enable_project_hosting: false
     anyapps_install_android: true
     anyapps_store_root: ''
+    anyapps_repair_conflicts: false
+    anyapps_auto_tls: true
+    anyapps_tls_email: ''
   tasks:
     - name: Require Debian and the assigned platform domain
       ansible.builtin.assert:
@@ -22,7 +25,7 @@
           - anyapps_domain == 'anyapp.olamidepanel.com'
     - name: Install runtime
       ansible.builtin.apt:
-        name: [git, python3-venv, python3-pip, nginx, curl, ca-certificates, openssl]
+        name: [git, python3-venv, python3-pip, nginx, curl, ca-certificates, openssl, certbot]
         update_cache: true
         cache_valid_time: 3600
     - name: Create isolated service account
@@ -104,7 +107,7 @@
       changed_when: false
     - name: Verify TLS certificate covers the assigned domain
       ansible.builtin.command:
-        argv: [openssl, x509, '-in', '{{ anyapps_tls_cert }}', '-noout', '-checkhost', '{{ anyapps_domain }}']
+        argv: [openssl, x509, '-in', '{{ anyapps_tls_cert }}', '-noout', '-checkhost', '{{ anyapps_domain }}', '-checkend', '604800']
       register: tls
       failed_when: false
       changed_when: false
@@ -128,21 +131,39 @@
       ansible.builtin.stat:
         path: '{{ anyapps_tls_key }}'
       register: tls_key
-    - name: Check exact AnyApps hostname is not managed by another nginx file
-      ansible.builtin.shell: |
-        set -eu
-        python3 - <<'PY'
-        import pathlib,re
-        for folder in ('/etc/nginx/sites-enabled','/etc/nginx/conf.d'):
-          for file in pathlib.Path(folder).glob('*'):
-            if file.is_file() and file.name not in ('anyapps','anyapps.conf'):
-              for directive in re.findall(r'server_name\s+([^;]+);',file.read_text(errors='replace')):
-                if 'anyapp.olamidepanel.com' in directive.split():
-                  raise SystemExit('Existing AnyApps host config at '+str(file)+'. Reconcile it before deployment.')
-        PY
-      args:
-        executable: /bin/bash
+    - name: Check previously issued dedicated AnyApps certificate
+      ansible.builtin.command:
+        argv: [openssl, x509, '-in', '/etc/letsencrypt/live/{{ anyapps_domain }}/fullchain.pem', '-noout', '-checkhost', '{{ anyapps_domain }}', '-checkend', '604800']
+      register: dedicated_tls
       changed_when: false
+      failed_when: false
+      when: not (anyapps_tls_ready and tls_key.stat.exists)
+    - name: Check dedicated private key
+      ansible.builtin.stat:
+        path: '/etc/letsencrypt/live/{{ anyapps_domain }}/privkey.pem'
+      register: dedicated_key
+      when: dedicated_tls is not skipped
+    - name: Reuse a valid dedicated certificate
+      ansible.builtin.set_fact:
+        anyapps_tls_cert: '/etc/letsencrypt/live/{{ anyapps_domain }}/fullchain.pem'
+        anyapps_tls_key: '/etc/letsencrypt/live/{{ anyapps_domain }}/privkey.pem'
+        anyapps_tls_ready: true
+        tls_key: {stat: {exists: true}}
+      when: dedicated_tls is not skipped and dedicated_tls.rc == 0 and dedicated_key.stat.exists
+    - name: Allocate hostname repair checkpoint
+      ansible.builtin.tempfile:
+        state: directory
+        path: /var/backups/anyapps
+        prefix: nginx-
+      register: hostname_checkpoint
+      when: anyapps_repair_conflicts | bool
+    - name: Create ACME challenge directory
+      ansible.builtin.file:
+        path: /var/www/anyapps-acme
+        state: directory
+        owner: root
+        group: root
+        mode: '0755'
     - name: Install dedicated nginx vhost with validation and rollback
       block:
         - name: Save previous AnyApps config
@@ -150,6 +171,29 @@
           register: previous_config
           failed_when: false
           changed_when: false
+        - name: Detach only the AnyApps name from conflicting vhosts
+          ansible.builtin.command:
+            argv: [python3, '{{ anyapps_root }}/scripts/repair-nginx-host.py', '--manifest', '{{ hostname_checkpoint.path }}/manifest.json']
+          register: host_repair
+          changed_when: (host_repair.stdout | from_json).changed
+          when: anyapps_repair_conflicts | bool
+        - name: Reject conflicting names when automatic repair was not requested
+          ansible.builtin.shell: |
+            python3 - <<'PY'
+            import sys
+            from pathlib import Path
+            sys.path.insert(0,'{{ anyapps_root }}/scripts')
+            import importlib.util
+            spec=importlib.util.spec_from_file_location('repair',Path('{{ anyapps_root }}')/'scripts/repair-nginx-host.py')
+            repair=importlib.util.module_from_spec(spec);spec.loader.exec_module(repair)
+            own=Path('/etc/nginx/sites-available/anyapps').resolve()
+            for base,pattern in [('/etc/nginx/sites-enabled','*'),('/etc/nginx/conf.d','*.conf')]:
+              for file in Path(base).glob(pattern):
+                if file.is_file() and file.resolve()!=own and repair.detach_host(file.read_text())[1]:
+                  raise SystemExit('Hostname conflict: '+str(file)+'. Run scripts/repair-routing.sh to repair only the AnyApps mapping.')
+            PY
+          changed_when: false
+          when: not (anyapps_repair_conflicts | bool)
         - name: Write AnyApps vhost
           ansible.builtin.template:
             src: nginx.j2
@@ -164,14 +208,23 @@
           ansible.builtin.command: nginx -t
           changed_when: false
       rescue:
+        - name: Check hostname repair manifest
+          ansible.builtin.stat:
+            path: '{{ hostname_checkpoint.path }}/manifest.json'
+          register: repair_manifest
+          when: anyapps_repair_conflicts | bool
+        - name: Restore other vhosts after failed validation
+          ansible.builtin.command:
+            argv: [python3, '{{ anyapps_root }}/scripts/repair-nginx-host.py', '--manifest', '{{ hostname_checkpoint.path }}/manifest.json', '--restore']
+          when: anyapps_repair_conflicts | bool and repair_manifest.stat.exists | default(false)
         - name: Restore prior config if available
           ansible.builtin.command: cp -p /etc/nginx/sites-available/anyapps.previous /etc/nginx/sites-available/anyapps
-          when: previous_config.rc == 0
+          when: previous_config.rc | default(1) == 0
         - name: Remove new vhost link if no prior config existed
           ansible.builtin.file:
             path: /etc/nginx/sites-enabled/anyapps
             state: absent
-          when: previous_config.rc != 0
+          when: previous_config.rc | default(1) != 0
         - name: Report validation failure without reloading nginx
           ansible.builtin.fail:
             msg: AnyApps nginx validation failed. Existing services were not reloaded.
@@ -192,10 +245,77 @@
       delay: 3
       register: health
       until: health.status == 200
+      failed_when: health.status != 200 or health.json.service | default('') != 'AnyApps' 
     - name: Reload validated nginx configuration
       ansible.builtin.systemd_service:
         name: nginx
         state: reloaded
+    - name: Obtain dedicated TLS certificate if no matching certificate exists
+      ansible.builtin.command:
+        argv: "{{ ['certbot', 'certonly', '--webroot', '-w', '/var/www/anyapps-acme', '-d', anyapps_domain, '--cert-name', anyapps_domain, '--non-interactive', '--agree-tos'] + (['--email', anyapps_tls_email] if anyapps_tls_email | length > 0 else ['--register-unsafely-without-email']) }}"
+      when: anyapps_auto_tls | bool and not (anyapps_tls_ready and tls_key.stat.exists)
+      register: issued_tls
+      changed_when: issued_tls.rc == 0
+    - name: Use dedicated TLS certificate after issuance
+      ansible.builtin.set_fact:
+        anyapps_tls_cert: '/etc/letsencrypt/live/{{ anyapps_domain }}/fullchain.pem'
+        anyapps_tls_key: '/etc/letsencrypt/live/{{ anyapps_domain }}/privkey.pem'
+        anyapps_tls_ready: true
+        tls_key: {stat: {exists: true}}
+      when: issued_tls is not skipped
+    - name: Enable the dedicated HTTPS vhost after issuance
+      ansible.builtin.template:
+        src: nginx.j2
+        dest: /etc/nginx/sites-available/anyapps
+        mode: '0644'
+      when: issued_tls is not skipped
+    - name: Ensure certificate deploy hook directory exists
+      ansible.builtin.file:
+        path: /etc/letsencrypt/renewal-hooks/deploy
+        state: directory
+        owner: root
+        group: root
+        mode: '0755'
+      when: anyapps_auto_tls | bool
+    - name: Reload nginx after future certificate renewals
+      ansible.builtin.copy:
+        dest: /etc/letsencrypt/renewal-hooks/deploy/anyapps-nginx.sh
+        mode: '0755'
+        content: |
+          #!/bin/sh
+          set -eu
+          /usr/sbin/nginx -t
+          /bin/systemctl reload nginx
+      when: anyapps_auto_tls | bool
+    - name: Validate HTTPS configuration
+      ansible.builtin.command: nginx -t
+      changed_when: false
+    - name: Reload validated HTTPS configuration
+      ansible.builtin.systemd_service:
+        name: nginx
+        state: reloaded
+    - name: Verify TLS and AnyApps routing on this server
+      ansible.builtin.command:
+        argv: [curl, '--fail', '--silent', '--show-error', '--max-time', '20', '--resolve', '{{ anyapps_domain }}:443:127.0.0.1', 'https://{{ anyapps_domain }}/health']
+      register: routed_health
+      changed_when: false
+      failed_when: routed_health.rc != 0 or (routed_health.stdout | from_json).service | default('') != 'AnyApps'
+    - name: Verify public HTTPS serves AnyApps
+      ansible.builtin.uri:
+        url: 'https://{{ anyapps_domain }}/health'
+        validate_certs: true
+        return_content: true
+        status_code: 200
+      register: public_health
+      failed_when: public_health.status != 200 or public_health.json.service | default('') != 'AnyApps'
+    - name: Verify public homepage branding
+      ansible.builtin.uri:
+        url: 'https://{{ anyapps_domain }}/'
+        validate_certs: true
+        return_content: true
+        status_code: 200
+      register: public_home
+      failed_when: public_home.status != 200 or '<title>AnyApps' not in public_home.content
     - name: Install latest Android development release when available
       ansible.builtin.command:
         argv: [python3, '{{ anyapps_root }}/scripts/install-apk.py']

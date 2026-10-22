@@ -132,3 +132,21 @@ def test_store_publisher_preserves_other_apps_and_visibility(tmp_path):
         assert c.execute('SELECT COUNT(*) FROM hosted_apps').fetchone()[0]==2
         assert c.execute('SELECT metadata FROM hosted_apps WHERE domain=?',('existing.example',)).fetchone()[0]=='{}'
         assert json.loads(c.execute('SELECT metadata FROM hosted_apps WHERE domain=?',(mod.DOMAIN,)).fetchone()[0])['sha256']==digest
+
+def test_hostname_repair_preserves_other_domains_and_comments():
+    import importlib.util
+    from pathlib import Path
+    spec=importlib.util.spec_from_file_location('nginx_repair',Path(__file__).parents[1]/'scripts/repair-nginx-host.py');mod=importlib.util.module_from_spec(spec);spec.loader.exec_module(mod)
+    text='''# server_name anyapp.olamidepanel.com;
+server { listen 443 ssl; server_name afribulkhub.com anyapp.olamidepanel.com www.afribulkhub.com; proxy_pass http://127.0.0.1:8091; }
+server { server_name "ANYAPP.OLAMIDEPANEL.COM"; }
+server { server_name *.olamidepanel.com; }
+'''
+    result,count=mod.detach_host(text)
+    assert count==2
+    assert '# server_name anyapp.olamidepanel.com;' in result
+    assert 'afribulkhub.com  www.afribulkhub.com' in result
+    assert 'proxy_pass http://127.0.0.1:8091;' in result
+    assert 'server_name detached-anyapp.olamidepanel.invalid;' in result
+    assert 'server_name *.olamidepanel.com;' in result
+    assert mod.detach_host(result)[1]==0
