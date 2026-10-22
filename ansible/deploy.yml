@@ -157,7 +157,16 @@
         anyapps_tls_key: '/etc/letsencrypt/live/{{ anyapps_domain }}/privkey.pem'
         anyapps_tls_ready: true
         tls_key: {stat: {exists: true}}
-      when: dedicated_tls is not skipped and dedicated_tls.rc == 0 and dedicated_key.stat.exists
+      when: dedicated_tls is not skipped and dedicated_tls.rc == 0 and 'does match certificate' in dedicated_tls.stdout and dedicated_key.stat.exists
+    - name: Discover effective nginx listener groups and included configuration
+      ansible.builtin.command:
+        argv: [python3, '{{ anyapps_root }}/scripts/repair-nginx-host.py', '--discover']
+      register: nginx_routes
+      changed_when: false
+    - name: Match the existing nginx address groups for AnyApps
+      ansible.builtin.set_fact:
+        anyapps_http_listens: '{{ (nginx_routes.stdout | from_json).http_listens }}'
+        anyapps_https_listens: '{{ (nginx_routes.stdout | from_json).https_listens }}'
     - name: Allocate hostname repair checkpoint
       ansible.builtin.tempfile:
         state: directory
@@ -267,6 +276,13 @@
       when: anyapps_auto_tls | bool and not (anyapps_tls_ready and tls_key.stat.exists)
       register: issued_tls
       changed_when: issued_tls.rc == 0
+    - name: Verify issued certificate hostname and remaining validity
+      ansible.builtin.command:
+        argv: [openssl, x509, '-in', '/etc/letsencrypt/live/{{ anyapps_domain }}/fullchain.pem', '-noout', '-checkhost', '{{ anyapps_domain }}', '-checkend', '604800']
+      register: issued_certificate_check
+      changed_when: false
+      failed_when: issued_certificate_check.rc != 0 or 'does match certificate' not in issued_certificate_check.stdout
+      when: issued_tls is not skipped
     - name: Use dedicated TLS certificate after issuance
       ansible.builtin.set_fact:
         anyapps_tls_cert: '/etc/letsencrypt/live/{{ anyapps_domain }}/fullchain.pem'
@@ -305,12 +321,30 @@
       ansible.builtin.systemd_service:
         name: nginx
         state: reloaded
-    - name: Verify TLS and AnyApps routing on this server
-      ansible.builtin.command:
-        argv: [curl, '--fail', '--silent', '--show-error', '--max-time', '20', '--resolve', '{{ anyapps_domain }}:443:127.0.0.1', 'https://{{ anyapps_domain }}/health']
-      register: routed_health
-      changed_when: false
-      failed_when: routed_health.rc != 0 or (routed_health.stdout | from_json).service | default('') != 'AnyApps'
+    - name: Verify local HTTPS identity with diagnostics
+      block:
+        - name: Wait for the correct certificate and AnyApps identity after nginx reload
+          ansible.builtin.command:
+            argv: [curl, '--fail', '--silent', '--show-error', '--noproxy', '*', '--max-time', '20', '--resolve', '{{ anyapps_domain }}:443:127.0.0.1', 'https://{{ anyapps_domain }}/health']
+          register: routed_health
+          changed_when: false
+          retries: 10
+          delay: 2
+          until: routed_health.rc == 0 and (routed_health.stdout | from_json).service | default('') == 'AnyApps'
+          failed_when: routed_health.rc != 0 or (routed_health.stdout | from_json).service | default('') != 'AnyApps'
+      rescue:
+        - name: Collect public certificate and active listener diagnostics
+          ansible.builtin.command:
+            argv: [python3, '{{ anyapps_root }}/scripts/repair-nginx-host.py', '--diagnose']
+          register: tls_diagnostic
+          changed_when: false
+          failed_when: false
+        - name: Show TLS routing diagnostic without secrets
+          ansible.builtin.debug:
+            msg: '{{ tls_diagnostic.stdout }}'
+        - name: Stop until the actual served certificate matches AnyApps
+          ansible.builtin.fail:
+            msg: AnyApps is healthy internally, but HTTPS routing still does not present the correct certificate. Review the listener and certificate diagnostic above. Certificate verification was not bypassed.
     - name: Verify public HTTPS serves AnyApps
       ansible.builtin.uri:
         url: 'https://{{ anyapps_domain }}/health'

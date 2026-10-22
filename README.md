@@ -138,3 +138,7 @@ Rollback of detached mappings (only if needed): `sudo python3 scripts/repair-ngi
 ### Port collision protection
 
 The server already uses port 18840 for Africa Credit. AnyApps now probes the preferred port, reuses it only if it is free or serves the AnyApps health identity, and otherwise selects an available port from 18841–18939. The choice is saved in `/var/lib/anyapps/listen-port.json` and reused on subsequent deployments. Gunicorn, nginx and health checks all use the selected port. No other application is stopped or moved. A failed health identity check is retried while AnyApps starts, and deployment cannot succeed merely because another service returns HTTP 200.
+
+### HTTPS certificate routing
+
+Routing discovery now reads `nginx -T`, including panel-managed configuration outside `sites-enabled` and `conf.d`. AnyApps joins existing non-proxy-protocol HTTP/HTTPS address groups so an explicit IP listener cannot silently select another default site's certificate. Conflicting exact hostnames are backed up and detached across all active included files. Newly issued and reused certificates are checked for the AnyApps hostname and remaining validity. The local HTTPS check bypasses outbound proxies, verifies TLS normally and retries after reload. If it still fails, the playbook reports the served certificate subject/SAN and active listener groups without displaying private keys. Run `sudo python3 scripts/repair-nginx-host.py --diagnose` for the same diagnostic.

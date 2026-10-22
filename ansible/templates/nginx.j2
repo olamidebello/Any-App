@@ -1,5 +1,7 @@
 server {
-  listen 80;
+{% for address in anyapps_http_listens | default(['80']) %}
+  listen {{ address }};
+{% endfor %}
   server_name {{ anyapps_domain }};
   location ^~ /.well-known/acme-challenge/ {
     root /var/www/anyapps-acme;
@@ -10,7 +12,9 @@ server {
   location / { return 301 https://$host$request_uri; }
 }
 server {
-  listen 443 ssl;
+{% for address in anyapps_https_listens | default(['443']) %}
+  listen {{ address }} ssl;
+{% endfor %}
   server_name {{ anyapps_domain }};
   ssl_certificate {{ anyapps_tls_cert }};
   ssl_certificate_key {{ anyapps_tls_key }};
@@ -29,7 +33,9 @@ server {
 {% if anyapps_enable_project_hosting and anyapps_tls_ready and tls_key.stat.exists %}
 # Exact-name existing sites take priority. Enable only after wildcard DNS/TLS validation.
 server {
-  listen 443 ssl;
+{% for address in anyapps_https_listens | default(['443']) %}
+  listen {{ address }} ssl;
+{% endfor %}
   server_name ~^(?<anyapps_slug>[a-z][a-z0-9-]{2,39})\.olamidepanel\.com$;
   ssl_certificate {{ anyapps_tls_cert }};
   ssl_certificate_key {{ anyapps_tls_key }};

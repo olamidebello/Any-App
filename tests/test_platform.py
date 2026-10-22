@@ -183,3 +183,18 @@ def test_port_selection_reuses_running_anyapps():
     server=ThreadingHTTPServer(('127.0.0.1',0),Handler);thread=threading.Thread(target=server.serve_forever,daemon=True);thread.start()
     try:assert mod.select(18840,saved=server.server_port)==server.server_port
     finally:server.shutdown();server.server_close();thread.join()
+
+def test_nginx_discovery_matches_explicit_sni_address_groups():
+    import importlib.util
+    from pathlib import Path
+    spec=importlib.util.spec_from_file_location('routes',Path(__file__).parents[1]/'scripts/repair-nginx-host.py');mod=importlib.util.module_from_spec(spec);spec.loader.exec_module(mod)
+    dump='''# configuration file /etc/nginx/nginx.conf:
+# listen 10.0.0.1:443 ssl;
+# configuration file /etc/nginx/panel/generated.conf:
+server {listen 127.0.0.1:443 ssl; listen 181.214.149.146:443 ssl; listen [::]:443 ssl; listen 443 ssl;}
+server {listen 181.214.149.146:80;}
+server {listen 10.0.0.2:443 ssl proxy_protocol;}
+'''
+    assert mod.listen_addresses(dump,443)==['443','127.0.0.1:443','181.214.149.146:443','[::]:443']
+    assert mod.listen_addresses(dump,80)==['80','181.214.149.146:80']
+    assert Path('/etc/nginx/panel/generated.conf') in mod.active_files(dump)
