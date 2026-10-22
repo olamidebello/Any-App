@@ -1,0 +1,21 @@
+[Unit]
+Description=AnyApps {{ item.suffix }}
+After=network-online.target
+Wants=network-online.target
+[Service]
+Type=simple
+User=anyapps
+Group=anyapps
+WorkingDirectory={{ anyapps_root }}
+EnvironmentFile=/etc/anyapps/anyapps.env
+ExecStart={{ item.command }}
+Restart=on-failure
+RestartSec=5
+UMask=0022
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/var/lib/anyapps /srv/anyapps-sites
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,37 @@
+server {
+  listen 80;
+  server_name {{ anyapps_domain }};
+{% if anyapps_tls_ready and tls_key.stat.exists %}
+  return 301 https://$host$request_uri;
+}
+server {
+  listen 443 ssl;
+  server_name {{ anyapps_domain }};
+  ssl_certificate {{ anyapps_tls_cert }};
+  ssl_certificate_key {{ anyapps_tls_key }};
+  ssl_protocols TLSv1.2 TLSv1.3;
+{% endif %}
+  client_max_body_size 2m;
+  location / {
+    proxy_pass http://127.0.0.1:{{ anyapps_port }};
+    proxy_set_header Host $host;
+    proxy_set_header X-Real-IP $remote_addr;
+    proxy_set_header X-Forwarded-For $remote_addr;
+    proxy_set_header X-Forwarded-Proto $scheme;
+    proxy_read_timeout 150s;
+  }
+}
+{% if anyapps_enable_project_hosting and anyapps_tls_ready and tls_key.stat.exists %}
+# Exact-name existing sites take priority. Enable only after wildcard DNS/TLS validation.
+server {
+  listen 443 ssl;
+  server_name ~^(?<anyapps_slug>[a-z][a-z0-9-]{2,39})\.olamidepanel\.com$;
+  ssl_certificate {{ anyapps_tls_cert }};
+  ssl_certificate_key {{ anyapps_tls_key }};
+  root /srv/anyapps-sites/$anyapps_slug;
+  index index.html;
+  add_header X-Content-Type-Options nosniff always;
+  add_header Content-Security-Policy "default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; img-src data:; connect-src 'none'; frame-ancestors 'none'; form-action 'none'; base-uri 'none'" always;
+  location / { try_files $uri $uri/ =404; }
+}
+{% endif %}

@@ -1,0 +1,45 @@
+name: Build AnyApps Android
+on:
+  push:
+    branches: [main]
+    paths: ['android/**', '.github/workflows/android.yml']
+  workflow_dispatch:
+permissions:
+  contents: write
+concurrency:
+  group: android-development
+  cancel-in-progress: false
+jobs:
+  android:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+      - uses: android-actions/setup-android@v3
+      - uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: '8.9'
+      - name: Build development APK
+        working-directory: android
+        env:
+          APP_VERSION_CODE: ${{ github.run_number }}
+        run: gradle --no-daemon assembleDebug
+      - name: Prepare verifiable package
+        run: |
+          cp android/app/build/outputs/apk/debug/app-debug.apk AnyApps.apk
+          sha256sum AnyApps.apk > AnyApps.apk.sha256
+      - uses: actions/upload-artifact@v4
+        with:
+          name: AnyApps-Android-development
+          path: |
+            AnyApps.apk
+            AnyApps.apk.sha256
+      - name: Publish development download
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release view android-development || gh release create android-development --prerelease --title 'AnyApps Android development build' --notes 'Development APK signed with a temporary debug key. Not a Play Store release. Uninstall older development builds before installing if signatures differ. Production release requires a persistent private signing key.'
+          gh release upload android-development AnyApps.apk AnyApps.apk.sha256 --clobber

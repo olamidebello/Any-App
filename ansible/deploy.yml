@@ -1,0 +1,227 @@
+---
+- name: Pull, build and deploy AnyApps on Olamidepanel
+  hosts: all
+  become: true
+  vars:
+    anyapps_repo: https://github.com/olamidebello/Any-App.git
+    anyapps_revision: main
+    anyapps_root: /opt/anyapps/repo
+    anyapps_domain: anyapp.olamidepanel.com
+    anyapps_port: 18840
+    anyapps_existing_env_file: ''
+    anyapps_tls_cert: /etc/letsencrypt/live/olamidepanel.com/fullchain.pem
+    anyapps_tls_key: /etc/letsencrypt/live/olamidepanel.com/privkey.pem
+    anyapps_enable_project_hosting: false
+    anyapps_install_android: true
+    anyapps_store_root: ''
+  tasks:
+    - name: Require Debian and the assigned platform domain
+      ansible.builtin.assert:
+        that:
+          - ansible_facts.os_family == 'Debian'
+          - anyapps_domain == 'anyapp.olamidepanel.com'
+    - name: Install runtime
+      ansible.builtin.apt:
+        name: [git, python3-venv, python3-pip, nginx, curl, ca-certificates, openssl]
+        update_cache: true
+        cache_valid_time: 3600
+    - name: Create isolated service account
+      ansible.builtin.user:
+        name: anyapps
+        system: true
+        home: /var/lib/anyapps
+        shell: /usr/sbin/nologin
+        create_home: true
+    - name: Create runtime and configuration directories
+      ansible.builtin.file:
+        path: '{{ item.path }}'
+        state: directory
+        owner: '{{ item.owner }}'
+        group: '{{ item.group }}'
+        mode: '{{ item.mode }}'
+      loop:
+        - {path: /etc/anyapps, owner: root, group: anyapps, mode: '0750'}
+        - {path: /var/lib/anyapps, owner: anyapps, group: anyapps, mode: '0750'}
+        - {path: /var/lib/anyapps/store-feed, owner: anyapps, group: anyapps, mode: '0755'}
+        - {path: /srv/anyapps-sites, owner: anyapps, group: www-data, mode: '0755'}
+        - {path: /var/backups/anyapps, owner: root, group: root, mode: '0700'}
+        - {path: /opt/anyapps, owner: root, group: root, mode: '0755'}
+    - name: Back up database using SQLite online backup
+      ansible.builtin.shell: |
+        set -eu
+        python3 - <<'PY'
+        import sqlite3,time
+        from pathlib import Path
+        source=Path('/var/lib/anyapps/anyapps.sqlite3')
+        if source.exists():
+            with sqlite3.connect(source) as src, sqlite3.connect('/var/backups/anyapps/'+time.strftime('%Y%m%d-%H%M%S')+'.sqlite3') as dst:
+                src.backup(dst)
+        PY
+      args:
+        executable: /bin/bash
+      changed_when: false
+    - name: Pull reviewed source without discarding local modifications
+      ansible.builtin.git:
+        repo: '{{ anyapps_repo }}'
+        dest: '{{ anyapps_root }}'
+        version: '{{ anyapps_revision }}'
+        force: false
+      notify: Restart AnyApps
+    - name: Install application dependencies
+      ansible.builtin.pip:
+        requirements: '{{ anyapps_root }}/requirements.txt'
+        virtualenv: /opt/anyapps/venv
+        virtualenv_command: python3 -m venv
+      notify: Restart AnyApps
+    - name: Prepare environment while reusing existing AI keys
+      ansible.builtin.command:
+        argv: [python3, '{{ anyapps_root }}/scripts/prepare-env.py', '--source', '{{ anyapps_existing_env_file }}']
+      no_log: true
+      register: env_result
+      changed_when: env_result.rc == 0
+      notify: Restart AnyApps
+    - name: Set runtime environment ownership
+      ansible.builtin.file:
+        path: /etc/anyapps/anyapps.env
+        owner: root
+        group: anyapps
+        mode: '0640'
+    - name: Install services
+      ansible.builtin.template:
+        src: service.j2
+        dest: '/etc/systemd/system/anyapps{{ item.suffix }}.service'
+        owner: root
+        group: root
+        mode: '0644'
+      loop:
+        - {suffix: '', command: '/opt/anyapps/venv/bin/gunicorn --workers 2 --bind 127.0.0.1:18840 --access-logfile - app:create_app()'}
+        - {suffix: '-worker', command: '/opt/anyapps/venv/bin/flask --app app worker'}
+      notify: Restart AnyApps
+    - name: Verify application import and initialize schema as service user
+      ansible.builtin.command:
+        argv: [/opt/anyapps/venv/bin/python, '{{ anyapps_root }}/scripts/init-db.py']
+      become_user: anyapps
+      changed_when: false
+    - name: Verify TLS certificate covers the assigned domain
+      ansible.builtin.command:
+        argv: [openssl, x509, '-in', '{{ anyapps_tls_cert }}', '-noout', '-checkhost', '{{ anyapps_domain }}']
+      register: tls
+      failed_when: false
+      changed_when: false
+    - name: Record certificate hostname validation
+      ansible.builtin.set_fact:
+        anyapps_tls_ready: "{{ tls.rc == 0 and 'does match certificate' in tls.stdout }}"
+    - name: Check certificate covers generated project subdomains
+      ansible.builtin.command:
+        argv: [openssl, x509, '-in', '{{ anyapps_tls_cert }}', '-noout', '-checkhost', anyapps-wildcard-check.olamidepanel.com]
+      register: wildcard_tls
+      changed_when: false
+      failed_when: false
+      when: anyapps_enable_project_hosting | bool
+    - name: Require wildcard TLS for project hosting
+      ansible.builtin.assert:
+        that:
+          - "'does match certificate' in wildcard_tls.stdout"
+        fail_msg: Project hosting requires a certificate covering wildcard olamidepanel.com subdomains.
+      when: anyapps_enable_project_hosting | bool
+    - name: Check TLS private key
+      ansible.builtin.stat:
+        path: '{{ anyapps_tls_key }}'
+      register: tls_key
+    - name: Check exact AnyApps hostname is not managed by another nginx file
+      ansible.builtin.shell: |
+        set -eu
+        python3 - <<'PY'
+        import pathlib,re
+        for folder in ('/etc/nginx/sites-enabled','/etc/nginx/conf.d'):
+          for file in pathlib.Path(folder).glob('*'):
+            if file.is_file() and file.name not in ('anyapps','anyapps.conf'):
+              for directive in re.findall(r'server_name\s+([^;]+);',file.read_text(errors='replace')):
+                if 'anyapp.olamidepanel.com' in directive.split():
+                  raise SystemExit('Existing AnyApps host config at '+str(file)+'. Reconcile it before deployment.')
+        PY
+      args:
+        executable: /bin/bash
+      changed_when: false
+    - name: Install dedicated nginx vhost with validation and rollback
+      block:
+        - name: Save previous AnyApps config
+          ansible.builtin.command: cp -p /etc/nginx/sites-available/anyapps /etc/nginx/sites-available/anyapps.previous
+          register: previous_config
+          failed_when: false
+          changed_when: false
+        - name: Write AnyApps vhost
+          ansible.builtin.template:
+            src: nginx.j2
+            dest: /etc/nginx/sites-available/anyapps
+            mode: '0644'
+        - name: Enable AnyApps vhost
+          ansible.builtin.file:
+            src: /etc/nginx/sites-available/anyapps
+            dest: /etc/nginx/sites-enabled/anyapps
+            state: link
+        - name: Validate complete nginx configuration
+          ansible.builtin.command: nginx -t
+          changed_when: false
+      rescue:
+        - name: Restore prior config if available
+          ansible.builtin.command: cp -p /etc/nginx/sites-available/anyapps.previous /etc/nginx/sites-available/anyapps
+          when: previous_config.rc == 0
+        - name: Remove new vhost link if no prior config existed
+          ansible.builtin.file:
+            path: /etc/nginx/sites-enabled/anyapps
+            state: absent
+          when: previous_config.rc != 0
+        - name: Report validation failure without reloading nginx
+          ansible.builtin.fail:
+            msg: AnyApps nginx validation failed. Existing services were not reloaded.
+    - name: Enable services
+      ansible.builtin.systemd_service:
+        name: '{{ item }}'
+        daemon_reload: true
+        enabled: true
+        state: started
+      loop: [anyapps, anyapps-worker]
+    - name: Apply application restarts
+      ansible.builtin.meta: flush_handlers
+    - name: Check application health
+      ansible.builtin.uri:
+        url: 'http://127.0.0.1:{{ anyapps_port }}/health'
+        status_code: 200
+      retries: 10
+      delay: 3
+      register: health
+      until: health.status == 200
+    - name: Reload validated nginx configuration
+      ansible.builtin.systemd_service:
+        name: nginx
+        state: reloaded
+    - name: Install latest Android development release when available
+      ansible.builtin.command:
+        argv: [python3, '{{ anyapps_root }}/scripts/install-apk.py']
+      register: apk
+      failed_when: false
+      changed_when: apk.rc == 0
+      when: anyapps_install_android | bool
+    - name: Export AnyApps listing to the configured store import directory
+      ansible.builtin.command:
+        argv: [python3, '{{ anyapps_root }}/scripts/store-export.py', '--store-root', '{{ anyapps_store_root }}']
+      when: anyapps_store_root | length > 0
+      register: store_export
+      changed_when: store_export.rc == 0
+    - name: Report deployment readiness
+      ansible.builtin.debug:
+        msg:
+          - 'Application is healthy on loopback port {{ anyapps_port }}.'
+          - 'TLS ready={{ anyapps_tls_ready and tls_key.stat.exists }}. Point anyapp.olamidepanel.com to this host. No DNS records were changed.'
+          - 'Free project hosting enabled={{ anyapps_enable_project_hosting }}. Requires wildcard DNS and matching wildcard TLS.'
+          - 'Android install result={{ apk.rc | default("skipped") }}. A missing CI release does not create a fake download link.'
+          - 'Create the first admin: sudo /opt/anyapps/repo/scripts/admin.sh'
+          - 'Store manifest exported only when anyapps_store_root is provided; verify the store importer before claiming publication.'
+  handlers:
+    - name: Restart AnyApps
+      ansible.builtin.systemd_service:
+        name: '{{ item }}'
+        daemon_reload: true
+        state: restarted
+      loop: [anyapps, anyapps-worker]
